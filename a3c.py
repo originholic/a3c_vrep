@@ -109,7 +109,7 @@ class netCreator(object):
 
         sync_ops = []
 
-        with tf.device("/gpu:0"):    
+        with tf.device("/cpu:0"):    
             with tf.op_scope([], name, "netCreator") as name:
                 for(src_policy_var, dst_policy_var) in zip(src_policy_vars, dst_policy_vars):
                     sync_op = tf.assign(dst_policy_var, src_policy_var)
