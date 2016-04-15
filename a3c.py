@@ -13,7 +13,7 @@ T = 0                               # Global shared counter
 TMAX = 5000000                      # Max iteration of global shared counter    
 THREADS = 12                        # Number of running thread
 N_STEP = 5                          # Number of steps before update
-WISHED_SCORE = 2000                 # Stopper of iterative learning
+WISHED_SCORE = 3000                 # Stopper of iterative learning
 GAMMA = 0.99                        # Decay rate of past observations
 ACTIONS = 2                         # Number of valid actions
 STATES = 4                          # Number of state
@@ -131,7 +131,7 @@ class netCreator(object):
                 self.W_fc5, self.b_fc5]
         
     def train(self, sess, states, actions, R, td, learningRate):
-        with tf.device("/gpu:0"):
+        with tf.device("/cpu:0"):
             sess.run(self.opt_v, feed_dict = {self.s: states, self.r: R, self.lr: learningRate})
             sess.run(self.opt_pi, feed_dict = {self.s: states, self.a: actions, self.diff: td, self.lr: learningRate})
 
