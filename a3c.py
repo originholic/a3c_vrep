@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 import os
-import time
-import math
 import random
 import threading
 import numpy as np
@@ -12,19 +10,17 @@ import default.env_cartpole as env
 T = 0                               # Global shared counter
 TMAX = 5000000                      # Max iteration of global shared counter    
 THREADS = 12                        # Number of running thread
-N_STEP = 5                          # Number of steps before update
-WISHED_SCORE = 3000                 # Stopper of iterative learning
+N_STEP = 7                          # Number of steps before update
+MAX_SCORE = 3000                    # Stopper of iterative learning
 GAMMA = 0.99                        # Decay rate of past observations
 ACTIONS = 2                         # Number of valid actions
 STATES = 4                          # Number of state
-ENTROPY_REGU = 0.0001                # Entropy regulation term: beta, default: 0.001
-# Initial Learning rate
-INITIAL_ALPHA_LOW = 1e-5            # Lowest learning rate
-INITIAL_ALPHA_HIGH = 1e-4           # Hight learning rate
+ENTROPY_REGU = 0.001               # Entropy regulation term: beta, default: 0.001
+INIT_LEARNING_RATE = 0.0001        # Initial learning rate
 # Optimizer
 OPT_DECAY = 0.99                    # Discouting factor for the gradient, default: 0.99
 OPT_MOMENTUM = 0.0                  # A scalar tensor, default: 0.0
-OPT_EPSILON = 0.005                  # value to avoid zero denominator, default: 0.01
+OPT_EPSILON = 0.005                 # value to avoid zero denominator, default: 0.01
 CHECKPOINT_DIR = 'default/save_a3c'
 
 class netCreator(object):
@@ -32,11 +28,7 @@ class netCreator(object):
         with tf.device("/cpu:0"):
             # Placeholder
             self.s = tf.placeholder("float", [None, STATES])  # Make as input layer of network
-            self.a = tf.placeholder("float", [None, ACTIONS]) # Action holder
-            self.diff = tf.placeholder("float", [None])       # Temporary difference (R-V) (input for policy)
-            self.r = tf.placeholder("float", [None])          # R term
-            self.lr = tf.placeholder("float", [])             # Adaptable learning rate
-            
+     
             # Network weights   
             self.W_fc1 = self._weight_variable([STATES, 300])
             self.b_fc1 = self._bias_variable([300])
@@ -73,14 +65,18 @@ class netCreator(object):
     def loss_func(self):
         #global ENTROPY_REGU, OPT_DECAY, OPT_MOMENTUM, OPT_EPSILON
         with tf.device("/cpu:0"):
-            # TODO check policy entropy
+            # Entropy loss
             entropy = -tf.reduce_sum(self.pi * self.log_pi)
             # Policy loss
-            self.pi_loss = -(tf.reduce_sum(tf.mul(self.log_pi, self.a), reduction_indices=1) * self.diff + ENTROPY_REGU * entropy)
+            self.a = tf.placeholder("float", [None, ACTIONS])
+            self.diff = tf.placeholder("float", [None])
+            self.pi_loss = -(tf.reduce_sum(tf.mul(self.log_pi, self.a), 1) * self.diff + ENTROPY_REGU * entropy)
             # Value loss
+            self.r = tf.placeholder("float", [None])
             self.v_loss = tf.reduce_mean(tf.square(self.r - self.v))
             
             # Optimizer
+            self.lr = tf.placeholder("float")
             self.optimizer = tf.train.RMSPropOptimizer(self.lr, OPT_DECAY, OPT_MOMENTUM, OPT_EPSILON)
             self.opt_v = self.optimizer.minimize(self.v_loss)
             self.opt_pi = self.optimizer.minimize(self.pi_loss)  # TODO: wait.. should we maximize?
@@ -131,7 +127,7 @@ class netCreator(object):
                 self.W_fc5, self.b_fc5]
         
     def train(self, sess, states, actions, R, td, learningRate):
-        with tf.device("/cpu:0"):
+        with tf.device("/gpu:0"):
             sess.run(self.opt_v, feed_dict = {self.s: states, self.r: R, self.lr: learningRate})
             sess.run(self.opt_pi, feed_dict = {self.s: states, self.a: actions, self.diff: td, self.lr: learningRate})
 
@@ -163,8 +159,6 @@ class trainThread(object):
         self.t = 1
         self.step_score = 0
         self.episodic_score = 0
-        
-        time.sleep(num/3)
         
     def choose_action(self, pi_values):
         totals = []
@@ -200,7 +194,7 @@ class trainThread(object):
 
         t_start = self.t
         # Act until terminal or we did 'n_step' steps     
-        while not(terminal or self.t - t_start == N_STEP):
+        for i in range(N_STEP):
             pi_ = self.thread_network.forward_policy(sess, s_t)
             v_t = self.thread_network.forward_value(sess, s_t)
             a_t = np.zeros([ACTIONS])
@@ -208,9 +202,6 @@ class trainThread(object):
             self.lock.acquire()
             s_t1, r_t, terminal = self.env_state.oneStep(a_t) # Run one step of sim 
             self.lock.release()
-            
-            if (self.num == 0) and (self.t % 100) == 0:
-                print "P:", pi_, "/ V", v_t
                 
             # Accumulate gradients
             states.append(s_t)
@@ -224,8 +215,18 @@ class trainThread(object):
             T += 1
             s_t = s_t1
             
-        self.episodic_score = self.step_score
-        
+            if (self.num == 0) and (self.t % 100) == 0:
+                print "P:", pi_, "/ V", v_t, "/ ACTION", a_t
+            
+            if terminal:
+                print "THREAD:", self.num, "/ TIME", T, "/ TIMESTEP", self.t, "/ SCORE", self.step_score         
+                self.step_score = 0
+                # Reset state
+                self.lock.acquire()
+                self.env_state.initialState()
+                self.lock.release()
+                break
+
         # bootstrap if last state not terminal
         R_t = 0.0 if terminal else self.thread_network.forward_value(sess, s_t)
         
@@ -239,16 +240,8 @@ class trainThread(object):
             td.append(R[i] - values[i])
             
         cur_lr = self._anneal_learning_rate(T)
-            
-        if terminal:
-            print "THREAD:", self.num, "/ TIME", T, "/ TIMESTEP", self.t, "/ LEARNINGRATE", cur_lr, "/ SCORE", self.episodic_score           
-            self.step_score = 0
-            # Reset state
-            self.lock.acquire()
-            self.env_state.initialState()
-            self.lock.release()
                        
-        return self.episodic_score, states, actions, R, td, cur_lr
+        return self.step_score, states, actions, R, td, cur_lr
     
     def _anneal_learning_rate(self, global_t):
         global TMAX
@@ -257,21 +250,16 @@ class trainThread(object):
             learning_rate = 0.0
         return learning_rate
 
-
-def log_uniform(lo, hi):
-    log_lo = math.log(lo)
-    log_hi = math.log(hi)  
-#    v = log_lo * (1-0.5) + log_hi * 0.5
-#    return math.exp(v)
-    return math.exp(random.uniform(log_lo, log_hi))
-
-def igniter(thread_index):
-    global T, TMAX
+def igniter(thread_index, coord):
+    global T, TMAX, MAX_SCORE
     training_thread = threads_checkin[thread_index]
     score = 0
-    while T < TMAX and score < WISHED_SCORE:
-        # apply gradients
-        # TODO: Considering tensorflow handles the 'batch', no need to accumulate and then update
+    while not coord.should_stop():
+        if T > TMAX:
+            coord.request_stop()
+        if score > MAX_SCORE:
+            coord.request_stop()
+            
         score, states, actions, R, td, cur_lr = training_thread.actorLearner(sess)
         global_network.train(sess, states, actions, R, td, cur_lr)
 
@@ -282,14 +270,16 @@ global_network.loss_func()
 lock = threading.Lock()
 threads_checkin = list()
 for i in range(THREADS):
-    initial_lr = log_uniform(INITIAL_ALPHA_LOW, INITIAL_ALPHA_HIGH)
-    training_threads = trainThread(i, lock, global_network, initial_lr)
+    training_threads = trainThread(i, lock, global_network, INIT_LEARNING_RATE)
     threads_checkin.append(training_threads)
   
 # Initialize session and variables
-sess = tf.InteractiveSession()
+sess = tf.Session(config=tf.ConfigProto(log_device_placement=False))
 saver = tf.train.Saver()
 sess.run(tf.initialize_all_variables())
+
+coord = tf.train.Coordinator()
+
 checkpoint = tf.train.get_checkpoint_state(CHECKPOINT_DIR)
 if checkpoint and checkpoint.model_checkpoint_path:
     saver.restore(sess, checkpoint.model_checkpoint_path)
@@ -299,7 +289,7 @@ if __name__ == "__main__":
     # Start n concurrent actor threads
     threads = list()
     for i in range(THREADS):
-        t = threading.Thread(target=igniter, args=(i,))
+        t = threading.Thread(target=igniter, args=(i, coord,))
         threads.append(t)
 
     # Start all threads
@@ -307,8 +297,7 @@ if __name__ == "__main__":
         x.start()
 
     # Wait for all of them to finish
-    for x in threads:
-        x.join()
+    coord.join(threads)
         
     if not os.path.exists(CHECKPOINT_DIR):
         os.mkdir(CHECKPOINT_DIR)  
