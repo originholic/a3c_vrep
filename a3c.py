@@ -4,24 +4,35 @@ import random
 import threading
 import numpy as np
 import tensorflow as tf
-import default.env_cartpole as env
+
+import default.cartpole as cartpole
+import default.mountaincar as mountaincar
+
+from collections import deque
 
 #Shared global hyper-parameters
-T = 0                               # Global shared counter
-TMAX = 5000000                      # Max iteration of global shared counter    
-THREADS = 12                        # Number of running thread
-N_STEP = 7                          # Number of steps before update
-MAX_SCORE = 3000                    # Stopper of iterative learning
-GAMMA = 0.99                        # Decay rate of past observations
-ACTIONS = 2                         # Number of valid actions
-STATES = 4                          # Number of state
-ENTROPY_REGU = 0.001               # Entropy regulation term: beta, default: 0.001
-INIT_LEARNING_RATE = 0.0001        # Initial learning rate
+T = 0                            # Global shared counter
+TMAX = 5000000                   # Max iteration of global shared counter    
+THREADS = 12                     # Number of running thread
+N_STEP = 7                       # Number of steps before update
+GAMMA = 0.99                     # Decay rate of past observations
+ENTROPY_REGU = 0.001             # Entropy regulation term: beta, default: 0.001
+INIT_LEARNING_RATE = 0.0001      # Initial learning rate
 # Optimizer
-OPT_DECAY = 0.99                    # Discouting factor for the gradient, default: 0.99
-OPT_MOMENTUM = 0.0                  # A scalar tensor, default: 0.0
-OPT_EPSILON = 0.005                 # value to avoid zero denominator, default: 0.01
-CHECKPOINT_DIR = 'default/save_a3c'
+OPT_DECAY = 0.99                 # Discouting factor for the gradient, default: 0.99
+OPT_MOMENTUM = 0.0               # A scalar tensor, default: 0.0
+OPT_EPSILON = 0.005              # value to avoid zero denominator, default: 0.01
+ENVIRONMENT = 1
+if ENVIRONMENT == 1:
+    ACTIONS = 2
+    STATES = 4
+    MAX_SCORE = 3000
+    CHECKPOINT_DIR = 'default/save_a3c/cartpole'
+elif ENVIRONMENT == 2:
+    ACTIONS = 3
+    STATES = 2
+    MAX_SCORE = 10
+    CHECKPOINT_DIR = 'default/save_a3c/mountaincar'
 
 class netCreator(object):
     def __init__(self):
@@ -137,12 +148,11 @@ class netCreator(object):
         return a, V
 
 class trainThread(object):
-    def __init__(self, num, lock, global_network, initial_lr):
+    def __init__(self, num, global_network, initial_lr, environment):
         
         print "THREAD ", num, "STARTING...", "LEARNING POLICY => INITIAL_LEARNING_RATE:", initial_lr
         
         self.num = num
-        self.lock = lock
         
         self.thread_network = netCreator()
         self.thread_network.loss_func()
@@ -150,15 +160,16 @@ class trainThread(object):
         self.sync_net = self.thread_network.sync_from(global_network)
         
         # Open communicate with environment
-        self.lock.acquire()
-        self.env_state = env.CartPole()
-        self.env_state.initialState()
-        self.lock.release()
+        self.environment = environment
+        if self.environment == 1:
+            self.env_state = cartpole.CartPole()
+        elif self.environment == 2:
+            self.env_state = mountaincar.MountainCarND()
+        self.env_state._reset()
         
         self.initial_lr = initial_lr
         self.t = 1
         self.step_score = 0
-        self.episodic_score = 0
         
     def choose_action(self, pi_values):
         totals = []
@@ -188,21 +199,22 @@ class trainThread(object):
         sess.run(self.sync_net) # Sync with global network
         
         # Grab a state
-        self.lock.acquire()
-        s_t, terminal = self.env_state.getState()
-        self.lock.release()
+        s_t, terminal = self.env_state._state()
 
         t_start = self.t
         # Act until terminal or we did 'n_step' steps     
         for i in range(N_STEP):
             pi_ = self.thread_network.forward_policy(sess, s_t)
             v_t = self.thread_network.forward_value(sess, s_t)
+            
+            # Action selection based on softmax
+            a_index = self.choose_action(pi_)
             a_t = np.zeros([ACTIONS])
-            a_t[self.choose_action(pi_)] = 1 # Action selection based on softmax
-            self.lock.acquire()
-            s_t1, r_t, terminal = self.env_state.oneStep(a_t) # Run one step of sim 
-            self.lock.release()
-                
+            a_t[a_index] = 1
+            
+            # Run one step of sim
+            s_t1, r_t, terminal = self.env_state._step(a_index)
+            
             # Accumulate gradients
             states.append(s_t)
             actions.append(a_t)
@@ -210,7 +222,10 @@ class trainThread(object):
             values.append(v_t)
             
             # Update counters
-            self.step_score += r_t
+            if self.environment == 1:
+                self.step_score += r_t
+            elif self.environment == 2:
+                self.step_score += 0
             self.t += 1
             T += 1
             s_t = s_t1
@@ -220,11 +235,12 @@ class trainThread(object):
             
             if terminal:
                 print "THREAD:", self.num, "/ TIME", T, "/ TIMESTEP", self.t, "/ SCORE", self.step_score         
-                self.step_score = 0
+                if self.environment == 1:
+                    self.step_score = 0
+                elif self.environment == 2:
+                    self.step_score += 1
                 # Reset state
-                self.lock.acquire()
-                self.env_state.initialState()
-                self.lock.release()
+                self.env_state._reset()
                 break
 
         # bootstrap if last state not terminal
@@ -250,7 +266,7 @@ class trainThread(object):
             learning_rate = 0.0
         return learning_rate
 
-def igniter(thread_index, coord):
+def igniter(thread_index, coord, lock):
     global T, TMAX, MAX_SCORE
     training_thread = threads_checkin[thread_index]
     score = 0
@@ -261,16 +277,21 @@ def igniter(thread_index, coord):
             coord.request_stop()
             
         score, states, actions, R, td, cur_lr = training_thread.actorLearner(sess)
+        lock.acquire()
         global_network.train(sess, states, actions, R, td, cur_lr)
-
+        lock.release()
+        
 # Globally shared network
 global_network = netCreator()
 global_network.loss_func()
-    
+
+# Global experiences for reply
+experiences = deque()
+
 lock = threading.Lock()
 threads_checkin = list()
 for i in range(THREADS):
-    training_threads = trainThread(i, lock, global_network, INIT_LEARNING_RATE)
+    training_threads = trainThread(i, global_network, INIT_LEARNING_RATE, ENVIRONMENT)
     threads_checkin.append(training_threads)
   
 # Initialize session and variables
@@ -289,7 +310,7 @@ if __name__ == "__main__":
     # Start n concurrent actor threads
     threads = list()
     for i in range(THREADS):
-        t = threading.Thread(target=igniter, args=(i, coord,))
+        t = threading.Thread(target=igniter, args=(i, coord, lock,))
         threads.append(t)
 
     # Start all threads
@@ -302,4 +323,4 @@ if __name__ == "__main__":
     if not os.path.exists(CHECKPOINT_DIR):
         os.mkdir(CHECKPOINT_DIR)  
 
-    saver.save(sess, CHECKPOINT_DIR + '/' + 'cartpole', global_step = T)
+    saver.save(sess, CHECKPOINT_DIR + '/' + 'checkpoint', global_step = T)

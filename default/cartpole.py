@@ -68,7 +68,7 @@ class CartPole:
         self.gravity = -9.8
         self.cart_mass = 1.
 
-    def initialState(self):
+    def _reset(self):
         self.cart_location = 0.0
         self.cart_velocity = 0.0
         self.pole_angle.fill(0.0)
@@ -76,11 +76,11 @@ class CartPole:
         if self.random_start:
             self.pole_angle = (numpy.random.random(self.pole_angle.shape)-0.5)/5.
         
-    def getState(self):   
+    def _state(self):   
         s_now = numpy.array([self.cart_location, self.cart_velocity, self.pole_angle, self.pole_velocity])
         return s_now, self.terminate()
         
-    def oneStep(self, intAction):
+    def _step(self, intAction):
          """
           Returns the current situation.
           A situation can be the current perceptual inputs, a random problem instance ...
@@ -103,9 +103,9 @@ class CartPole:
 
     def takeAction(self, intAction):
         #print ' ACTION  %d ' % (intAction)
-        if intAction[0] == 1:
+        if intAction == 0:
             force = self.max_force
-        elif intAction[1] == 1:
+        elif intAction == 1:
             force = -self.max_force
         else:
             force = 0.0
